@@ -92,15 +92,41 @@ async def test_get_tide_predictions(httpx_mock):
 @pytest.mark.asyncio
 async def test_get_station_info(httpx_mock):
     """Test getting station information."""
+    # Update sample data to include products information
+    sample_station_info = {
+        "stations": [
+            {
+                "id": "9414290",
+                "name": "San Francisco",
+                "lat": "37.8063",
+                "lon": "-122.4659",
+                "state": "CA",
+                "type": "waterlevels",
+                "timezonecorr": "-8",
+                "timezone": "LST/LDT",
+                "observedst": True,
+                "products": {
+                    "products": [
+                        {"name": "Tide Predictions"},
+                        {"name": "Water Levels"}
+                    ]
+                }
+            }
+        ]
+    }
+    
     httpx_mock.add_response(
-        url=f"{server.METADATA_URL}/9414290.json",
-        json=SAMPLE_STATION_INFO
+        url=f"{server.METADATA_URL}/9414290.json?expand=products",
+        json=sample_station_info
     )
     
     result = await server.get_station_info("9414290")
-    assert result == SAMPLE_STATION_INFO
     assert "stations" in result
     assert result["stations"][0]["id"] == "9414290"
+    assert "available_products" in result["stations"][0]
+    assert result["stations"][0]["available_products"]["tide_predictions"] is True
+    assert result["stations"][0]["available_products"]["water_levels"] is True
+    assert result["stations"][0]["available_products"]["is_active"] is True
 
 @pytest.mark.asyncio
 async def test_get_station_info_with_expand(httpx_mock):
@@ -116,6 +142,13 @@ async def test_get_station_info_with_expand(httpx_mock):
                 "type": "waterlevels",
                 "timezonecorr": "-8",
                 "timezone": "LST/LDT",
+                "observedst": True,
+                "products": {
+                    "products": [
+                        {"name": "Tide Predictions"},
+                        {"name": "Water Levels"}
+                    ]
+                },
                 "details": {
                     "state": "CA",
                     "county": "San Francisco",
@@ -132,15 +165,18 @@ async def test_get_station_info_with_expand(httpx_mock):
     }
     
     httpx_mock.add_response(
-        url=f"{server.METADATA_URL}/9414290.json?expand=details,sensors",
+        url=f"{server.METADATA_URL}/9414290.json?expand=products,details,sensors",
         json=expanded_info
     )
     
     result = await server.get_station_info("9414290", expand=["details", "sensors"])
-    assert result == expanded_info
     assert "stations" in result
     assert "details" in result["stations"][0]
     assert "sensors" in result["stations"][0]
+    assert "available_products" in result["stations"][0]
+    assert result["stations"][0]["available_products"]["tide_predictions"] is True
+    assert result["stations"][0]["available_products"]["water_levels"] is True
+    assert result["stations"][0]["available_products"]["is_active"] is True
 
 @pytest.mark.asyncio
 async def test_error_handling(httpx_mock):
