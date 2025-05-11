@@ -5,9 +5,19 @@ from datetime import datetime, timedelta
 import json
 import sys
 import asyncio
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Create an MCP server instance
 mcp = FastMCP("NOAA Tides")
+logger.info("NOAA Tides MCP Server starting up...")
 
 # Base URLs for NOAA CO-OPS APIs
 DATA_URL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
@@ -16,8 +26,8 @@ METADATA_URL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations
 @mcp.tool()
 async def get_water_levels(
     station_id: str,
-    begin_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    begin_date: str = None,
+    end_date: str = None,
     datum: str = "MLLW",
     time_zone: str = "gmt",
     units: str = "english"
@@ -36,6 +46,7 @@ async def get_water_levels(
     Returns:
         Dictionary containing water level data
     """
+    logger.info(f"Getting water levels for station {station_id}")
     try:
         params = {
             "station": station_id,
@@ -56,15 +67,17 @@ async def get_water_levels(
         async with httpx.AsyncClient() as client:
             response = await client.get(DATA_URL, params=params)
             response.raise_for_status()
+            logger.info(f"Successfully retrieved water levels for station {station_id}")
             return response.json()
     except Exception as e:
+        logger.error(f"Error getting water levels for station {station_id}: {str(e)}")
         return {"error": str(e)}
 
 @mcp.tool()
 async def get_tide_predictions(
     station_id: str,
-    begin_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    begin_date: str = None,
+    end_date: str = None,
     datum: str = "MLLW",
     time_zone: str = "gmt",
     units: str = "english",
@@ -85,6 +98,7 @@ async def get_tide_predictions(
     Returns:
         Dictionary containing tide predictions
     """
+    logger.info(f"Getting tide predictions for station {station_id}")
     try:
         params = {
             "station": station_id,
@@ -106,12 +120,14 @@ async def get_tide_predictions(
         async with httpx.AsyncClient() as client:
             response = await client.get(DATA_URL, params=params)
             response.raise_for_status()
+            logger.info(f"Successfully retrieved tide predictions for station {station_id}")
             return response.json()
     except Exception as e:
+        logger.error(f"Error getting tide predictions for station {station_id}: {str(e)}")
         return {"error": str(e)}
 
 @mcp.tool()
-async def get_station_info(station_id: str, expand: Optional[List[str]] = None) -> Dict:
+async def get_station_info(station_id: str, expand: List[str] = None) -> Dict:
     """
     Get information about a specific station using the NOAA CO-OPS Metadata API.
     
@@ -120,29 +136,118 @@ async def get_station_info(station_id: str, expand: Optional[List[str]] = None) 
         expand: List of additional resources to include (e.g., ["details", "sensors", "datums"])
     
     Returns:
-        Dictionary containing station information
+        Dictionary containing station information including available products
     """
+    logger.info(f"Getting station info for station {station_id}")
     try:
-        # Construct the URL with the station ID
+        # Construct the base URL with the station ID and .json extension
         url = f"{METADATA_URL}/{station_id}.json"
         
-        # Add expand parameter if provided
-        params = {}
+        # Add expand parameter to get products information
+        params = {"expand": "products"}
         if expand:
-            params["expand"] = ",".join(expand)
+            params["expand"] = f"products,{','.join(expand)}"
         
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            
+            # Add available products information
+            if "stations" in data and len(data["stations"]) > 0:
+                station = data["stations"][0]
+                available_products = {
+                    "tide_predictions": any(
+                        product["name"] == "Tide Predictions" 
+                        for product in station.get("products", {}).get("products", [])
+                    ),
+                    "water_levels": station.get("observedst", False),
+                    "currents": station.get("type") == "currents",
+                    "is_active": station.get("observedst", False)
+                }
+                station["available_products"] = available_products
+            
+            logger.info(f"Successfully retrieved station info for station {station_id}")
+            return data
     except Exception as e:
+        logger.error(f"Error getting station info for station {station_id}: {str(e)}")
+        return {"error": str(e)}
+
+@mcp.tool()
+async def search_stations(query: str) -> Dict:
+    """
+    Search for stations by name or location.
+    
+    Args:
+        query: Search term (e.g., city name, state, or station name)
+    
+    Returns:
+        Dictionary containing matching stations
+    """
+    logger.info(f"Searching for stations matching: {query}")
+    try:
+        # First get all stations
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{METADATA_URL}.json")
+            response.raise_for_status()
+            data = response.json()
+            
+            # Split query into parts (e.g., "Cambridge, MD" -> ["cambridge", "md"])
+            query_parts = [part.strip().lower() for part in query.split(',')]
+            matching_stations = []
+            
+            if "stations" in data:
+                for station in data["stations"]:
+                    # Get station details
+                    station_name = station.get("name", "").lower()
+                    state = station.get("state", "").lower()
+                    lat = station.get("lat", 0)
+                    lng = station.get("lng", 0)
+                    
+                    # Check if any query part matches station name or state
+                    matches = False
+                    for part in query_parts:
+                        if (part in station_name or 
+                            part in state or 
+                            (len(part) > 2 and part in station_name.split())):
+                            matches = True
+                            break
+                    
+                    if matches:
+                        # Add available products information
+                        available_products = {
+                            "tide_predictions": any(
+                                product["name"] == "Tide Predictions" 
+                                for product in station.get("products", {}).get("products", [])
+                            ),
+                            "water_levels": station.get("observedst", False),
+                            "currents": station.get("type") == "currents",
+                            "is_active": station.get("observedst", False)
+                        }
+                        station["available_products"] = available_products
+                        matching_stations.append(station)
+            
+            # Sort stations by relevance (exact matches first)
+            matching_stations.sort(key=lambda x: (
+                not any(part == x.get("name", "").lower() for part in query_parts),
+                not any(part == x.get("state", "").lower() for part in query_parts)
+            ))
+            
+            logger.info(f"Found {len(matching_stations)} matching stations")
+            return {
+                "stations": matching_stations,
+                "count": len(matching_stations)
+            }
+    except Exception as e:
+        logger.error(f"Error searching for stations: {str(e)}")
         return {"error": str(e)}
 
 async def main():
     try:
+        logger.info("Starting MCP server...")
         await mcp.run_stdio_async()
     except Exception as e:
-        print(f"Error running server: {e}", file=sys.stderr)
+        logger.error(f"Error running server: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
